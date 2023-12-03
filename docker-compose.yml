@@ -1,0 +1,38 @@
+version: "3"
+services:
+  node1:
+    image: ssh-server:ubuntu-22.04
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: node1
+    container_name: node1
+    volumes:
+      - .:/build
+  node2:
+    image: ssh-server:ubuntu-22.04
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: node2
+    container_name: node2
+    volumes:
+      - .:/build
+  node3:
+    image: ssh-server:ubuntu-22.04
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: node3
+    container_name: node3
+    volumes:
+      - .:/build
+  node4:
+    image: ssh-server:ubuntu-22.04
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: node4
+    container_name: node4
+    volumes:
+      - .:/build
