@@ -28,8 +28,7 @@ def get_container_names():
         pass  # 파일이 없는 경우 계속 진행
 
     # 모든 시도가 실패한 경우
-    raise ValueError(
-        "—hostfile 옵션이 제공되지 않았습니다.")
+    raise ValueError("--hostfile 옵션이 제공되지 않았습니다.")
 
 
 def run_command(container_name, command):
@@ -64,7 +63,7 @@ def execute_commands(container_names, command):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run commands on multiple Docker containers via SSH")
+    parser = argparse.ArgumentParser()
     parser.add_argument('--hostfile', type=str, default=None)  # --hostfile 옵션을 생략할 경우를 위해 default=None으로 설정
     parser.add_argument('command', type=str, nargs='+')
     args = parser.parse_args()
