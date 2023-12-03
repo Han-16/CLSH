@@ -1,6 +1,35 @@
 import argparse
 import concurrent.futures
 import subprocess
+import os
+
+
+def get_container_names():
+    # CLSH_HOSTS 환경 변수에서 호스트 이름 읽어오기
+    clsh_hosts = os.environ.get('CLSH_HOSTS')
+    if clsh_hosts:
+        return clsh_hosts.split(':')
+
+    # CLSH_HOSTFILE 환경 변수에서 파일 이름 읽어오기
+    clsh_hostfile = os.environ.get('CLSH_HOSTFILE')
+    if clsh_hostfile:
+        try:
+            with open(clsh_hostfile, 'r') as f:
+                return f.read().splitlines()
+        except FileNotFoundError:
+            pass  # 파일이 없는 경우 계속 진행
+
+    # 현재 디렉토리에서 .hostfile에서 읽어오기
+    default_hostfile = '.hostfile'
+    try:
+        with open(default_hostfile, 'r') as f:
+            return f.read().splitlines()
+    except FileNotFoundError:
+        pass  # 파일이 없는 경우 계속 진행
+
+    # 모든 시도가 실패한 경우
+    raise ValueError(
+        "—hostfile 옵션이 제공되지 않았습니다.")
 
 
 def run_command(container_name, command):
@@ -36,12 +65,21 @@ def execute_commands(container_names, command):
 
 def main():
     parser = argparse.ArgumentParser(description="Run commands on multiple Docker containers via SSH")
-    parser.add_argument('--hostfile', type=str, required=True)
+    parser.add_argument('--hostfile', type=str, default=None)  # --hostfile 옵션을 생략할 경우를 위해 default=None으로 설정
     parser.add_argument('command', type=str, nargs='+')
     args = parser.parse_args()
 
-    with open(args.hostfile, 'r') as f:
-        container_names = f.read().splitlines()
+    if args.hostfile is None:
+        # --hostfile 옵션이 제공되지 않은 경우, 환경 변수 및 기본 파일에서 호스트 정보 읽어오기
+        try:
+            container_names = get_container_names()
+        except ValueError as e:
+            print(f"Error: {str(e)}")
+            return
+    else:
+        # --hostfile 옵션이 제공된 경우 해당 파일에서 호스트 정보 읽어오기
+        with open(args.hostfile, 'r') as f:
+            container_names = f.read().splitlines()
 
     execute_commands(container_names, args.command)
 
