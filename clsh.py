@@ -30,20 +30,17 @@ def get_node_names():
 
     raise ValueError("--hostfile 옵션이 제공되지 않았습니다.")
 
-
 def worker(node, command):
-    ssh_command = ["ssh", "-T", node] + command
+    ssh_command = f"ssh -T {node} {' '.join(command)}"
 
     try:
-        # 명령어를 올바르게 파싱하기 위해 shlex.split을 사용
-        command_for_subprocess = shlex.split(" ".join(ssh_command))
-
         # Popen을 사용하여 ssh 명령을 실행하고 파이프를 통해 통신
         proc = subprocess.Popen(
-            command_for_subprocess,
+            ssh_command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.PIPE,  # 추가: 표준 입력에 대한 파이프
+            shell=True,
             text=True
         )
         stdout, stderr = proc.communicate(input="")
