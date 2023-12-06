@@ -36,3 +36,13 @@ services:
     container_name: node4
     volumes:
       - .:/build
+  clsh:
+    image: ssh-server:ubuntu-22.04
+    build:
+      context: .
+      dockerfile: Dockerfile-clsh
+    hostname: clsh
+    container_name: clsh
+    volumes:
+      - .:/build
+
