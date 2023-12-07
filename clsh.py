@@ -1,12 +1,11 @@
+import concurrent.futures
 import subprocess
 import argparse
 import os
-import threading
 from queue import Queue
-import shlex
 
-print_semaphore = threading.Semaphore()
 output_queue = Queue()
+
 
 def get_node_names():
     clsh_hosts = os.environ.get('CLSH_HOSTS')
@@ -30,74 +29,118 @@ def get_node_names():
 
     raise ValueError("--hostfile 옵션이 제공되지 않았습니다.")
 
-def worker(node, command):
+def worker(node, command, out_dir=None, err_dir=None):
     ssh_command = f"ssh -T {node} {' '.join(command)}"
 
     try:
         # Popen을 사용하여 ssh 명령을 실행하고 파이프를 통해 통신
-        proc = subprocess.Popen(
+        process = subprocess.Popen(
             ssh_command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE,  # 추가: 표준 입력에 대한 파이프
+            stdin=subprocess.PIPE,
             shell=True,
             text=True
         )
-        stdout, stderr = proc.communicate(input="")
-        returncode = proc.returncode
-    except subprocess.CalledProcessError as e:
-        stdout = ""
-        stderr = e.stderr
-        returncode = e.returncode
 
-    with print_semaphore:
-        output = (node, stdout, stderr, returncode)
-        output_queue.put(output)
+        stdout, stderr = process.communicate(input="")
+        returncode = process.returncode
+        result_message = None
+
+        if out_dir or err_dir:
+            if out_dir is None: # only --err
+                if returncode == 0: # success
+                    result_message = f"Error executing command"
+                else: #failed
+                    os.makedirs(err_dir, exist_ok = True)
+                    err_path = os.path.join(err_dir, f"{node}.err")
+
+                    with open(err_path, 'w') as err_file:
+                        err_file.write(stderr)
+
+            elif err_dir is None: # only --out
+                if returncode == 0: # success
+                    os.makedirs(out_dir, exist_ok=True)
+                    out_path = os.path.join(out_dir, f"{node}.out")
+
+                    with open(out_path, 'w') as out_file:
+                        out_file.write(stdout)
+                    result_message = f"Command executed successfully on {node}."
+
+                else: #failed
+                    result_message = f"Error executing command on {node}."
+            
+            else: # --out --err
+                if returncode == 0: # success
+                    os.makedirs(out_dir, exist_ok=True)
+                    out_path = os.path.join(out_dir, f"{node}.out")
+
+                    with open(out_path, 'w') as out_file:
+                        out_file.write(stdout)
+                    
+                    result_message = f"Success!! Result saved to: {out_path}"
+                else: # failed
+                    os.makedirs(err_dir, exist_ok=True)
+                    err_path = os.path.join(err_dir, f"{node}.err")
+
+                    with open(err_path, 'w') as err_file:
+                        err_file.write(stderr)
+
+                    result_message = f"ERROR!!   Stderr saved to: {err_path}"
+                    
+        return node, result_message, returncode
+
+    except Exception as e:
+        return node, f"There is something wrong with {node}: {str(e)}"
+
 
 def print_output():
     while True:
         output = output_queue.get()
         if output is None:
             break
+        node, message, returncode = output
+        output_str = f'{node}: {message}\n' if returncode == 0 else f'{node}: {message}\n'
+        print(output_str, end='', flush=True)
 
-        with print_semaphore:
-            node, stdout, stderr, returncode = output
-            output_str = f'{node}: {stdout.strip()}\n' if returncode == 0 else f'{node}: ERROR: {stderr.strip()}\n'
-            print(output_str, end='', flush=True)
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--hostlist', type=str, default=None)
     parser.add_argument('--hostfile', type=str, default=None)
+    parser.add_argument('--out', type=str, default=None)
+    parser.add_argument('--err', type=str, default=None)
     parser.add_argument('command', type=str, nargs='+')
     args = parser.parse_args()
 
-    if args.hostlist is not None:
-        # -hostlist 옵션이 제공된 경우 해당 노드 리스트 사용
+    if args.hostlist:
         nodes = args.hostlist.split(',')
     elif args.hostfile is None:
         try:
             nodes = get_node_names()
         except ValueError as e:
-            print(f"Error: {str(e)}")
             return
     else:
         with open(args.hostfile, 'r') as f:
             nodes = f.read().splitlines()
 
-    threads = []
-    for node in nodes:
-        t = threading.Thread(target=worker, args=(node, args.command))
-        threads.append(t)
-        t.start()
+    out_dir = args.out if args.out else None
+    err_dir = args.err if args.err else None
 
-    print_thread = threading.Thread(target=print_output)
-    print_thread.start()
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        # 각 노드에 대한 worker 함수를 스레드 풀에서 실행
+        futures = [executor.submit(worker, node, args.command, out_dir, err_dir) for node in nodes]
 
-    for t in threads:
-        t.join()
+        # Future의 결과를 가져와 출력 큐에 넣음
+        for future in concurrent.futures.as_completed(futures):
+            output_queue.put(future.result())
+
+    # 모든 worker 스레드 종료 후에 None 큐에 넣음
     output_queue.put(None)
-    print_thread.join()
+
+    # 스레드의 결과를 출력
+    print_output()
+
 
 if __name__ == "__main__":
     main()
