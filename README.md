@@ -87,3 +87,6 @@ node30: ...
 $ ls /etc/*.conf | clsh --hostfile ./hostfile -b xargs ls
 ```
 ls 의 결과를 clsh 로 전달하여 원격 실행하게 하기
+
+sudo chmod 755 /etc
+su ubuntu
