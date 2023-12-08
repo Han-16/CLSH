@@ -14,10 +14,9 @@ input_lock = threading.Lock()
 terminate_event = threading.Event()  # 종료 이벤트
 
 def handle_interrupt(signum, frame):
-    # 시그널 핸들러, set terminate_event를 설정하고, output_queue에 None 전송
-    print("Received signal. Cleaning up...")
-    terminate_event.set()   # 스레드 이벤트 추가.
-    output_queue.put(None)  # Signal the threads to exit
+    print(f"Received signal. Cleaning up... {signum}")
+    terminate_event.set()
+    output_queue.put(None)
     output_queue.join()
     sys.exit(0)
 
@@ -35,6 +34,7 @@ def get_node_names():
             pass
 
     default_hostfile = '.hostfile'
+
     try:
         with open(default_hostfile, 'r') as f:
             return f.read().splitlines()
@@ -255,35 +255,29 @@ def main():
 
             command = args.command
 
-            if args.command == []: # 명령어가 없이 실행했을 때
-                print(f"Switching to interactive mode. Working with nodes: {', '.join(get_node_names())}")
-                user_input = input("clsh> ").split()
-                print(f"user_input : {user_input}")
-                command = user_input
-
-            
             out_dir = args.out if args.out else None
             err_dir = args.err if args.err else None
 
+            if args.command == []: # 명령어가 없이 실행했을 때
+                print(f"Switching to interactive mode. Working with nodes: {', '.join(get_node_names())}")
+                user_input = input("clsh> ").split()
+                command = user_input
+
+
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                    futures = [executor.submit(
-                        worker, node, command, out_dir, err_dir) for node in nodes]
+                # 각 노드에 대한 worker 함수를 스레드 풀에서 실행
+                futures = [executor.submit(
+                    worker, node, command, out_dir, err_dir) for node in nodes]
 
-                    while not terminate_event.is_set():
-                        try:
-                            for future in concurrent.futures.as_completed(futures):
-                                output_queue.put(future.result())
+                # Future의 결과를 가져와 출력 큐에 넣음
+                for future in concurrent.futures.as_completed(futures):
+                    output_queue.put(future.result())
 
-                            output_queue.join(timeout=1)
-                        except KeyboardInterrupt:
-                            terminate_event.set()
-                            break
+            # 모든 worker 스레드 종료 후에 None 큐에 넣음
+            output_queue.put(None)
 
-                    output_queue.put(None)
-
-                    output_queue.join()
-
-                    print_output()
+            # 스레드의 결과를 출력
+            print_output()
 
         except ValueError as e:
             print(str(e))
