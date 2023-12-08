@@ -6,10 +6,20 @@ import subprocess
 from queue import Queue
 import threading
 import shlex
+import signal
+
 
 output_queue = Queue()
-input_lock = threading.Lock()  # Lock for synchronizing input
+input_lock = threading.Lock()
+terminate_event = threading.Event()  # 종료 이벤트
 
+def handle_interrupt(signum, frame):
+    # 시그널 핸들러, set terminate_event를 설정하고, output_queue에 None 전송
+    print("Received signal. Cleaning up...")
+    terminate_event.set()   # 스레드 이벤트 추가.
+    output_queue.put(None)  # Signal the threads to exit
+    output_queue.join()
+    sys.exit(0)
 
 def get_node_names():
     clsh_hosts = os.environ.get('CLSH_HOSTS')
@@ -146,9 +156,12 @@ def process_input(command, nodes, out_dir, err_dir):
 
 
 def main():
+    signal.signal(signal.SIGTERM, handle_interrupt)
+    signal.signal(signal.SIGQUIT, handle_interrupt)
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--hostlist', type=str, default=None)
-    parser.add_argument('--hostfile', type=str, required='-i' in sys.argv, default=None)
+    parser.add_argument('--hostfile', type=str, required='-i' in sys.argv, default=None) # -i 옵션에서는 hostfile 필수
     parser.add_argument('--out', type=str, default=None)
     parser.add_argument('--err', type=str, default=None)
     parser.add_argument('command', type=str, nargs='*', default=None)
@@ -179,7 +192,7 @@ def main():
                 if user_input.lower() == 'quit':
                     break
 
-                # Check for local command
+                # !명령어는 로컬 쉘에서 바로 실행
                 if user_input.startswith('!'):
                     local_command = user_input[1:]
                     local_process = subprocess.Popen(
@@ -194,27 +207,27 @@ def main():
                     print(local_stderr, end="")
                 else:
                     # Remote command
-                    if args.hostfile:  # interactive 모드에서는 --hostfile이 필요한 경우에만 처리
-                        with input_lock:  # Lock to synchronize input
-                            # 호스트 파일에서 호스트 이름을 읽어오기
+                    if args.hostfile:
+                        with input_lock:
                             with open(args.hostfile, 'r') as hostfile:
                                 nodes = hostfile.read().splitlines()
 
                             command_tokens = shlex.split(user_input)
 
-                            # 각 노드에 대한 ssh 명령 작성 및 실행
-                            for node in nodes:
-                                ssh_command = f"ssh -T {node} {' '.join(command_tokens)}"
-                                process = subprocess.Popen(
-                                    ssh_command,
-                                    stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE,
-                                    shell=True,
-                                    text=True
-                                )
-                                stdout, stderr = process.communicate()
-                                print(f"{ssh_command}: {stdout}")
-                                print(stderr, end="")
+                            with concurrent.futures.ThreadPoolExecutor() as executor:
+                                futures = [executor.submit(
+                                    worker, node, command_tokens, None, None) for node in nodes]
+
+                                # 결과가 나오는 대로 출력
+                                for future in concurrent.futures.as_completed(futures):
+                                    output_queue.put(future.result())
+
+                            # 모든 worker 스레드 종료 후에 None 큐에 넣음
+                            output_queue.put(None)
+
+                            # 스레드의 결과를 출력
+                            print_output()
+                     
 
             except EOFError:
                 break
@@ -241,7 +254,8 @@ def main():
                     nodes = f.read().splitlines()
 
             command = args.command
-            if args.command == []:
+
+            if args.command == []: # 명령어가 없이 실행했을 때
                 print(f"Switching to interactive mode. Working with nodes: {', '.join(get_node_names())}")
                 user_input = input("clsh> ").split()
                 print(f"user_input : {user_input}")
@@ -252,24 +266,27 @@ def main():
             err_dir = args.err if args.err else None
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                # 각 노드에 대한 worker 함수를 스레드 풀에서 실행
-                futures = [executor.submit(
-                    worker, node, command, out_dir, err_dir) for node in nodes]
+                    futures = [executor.submit(
+                        worker, node, command, out_dir, err_dir) for node in nodes]
 
-                # Future의 결과를 가져와 출력 큐에 넣음
-                for future in concurrent.futures.as_completed(futures):
-                    output_queue.put(future.result())
+                    while not terminate_event.is_set():
+                        try:
+                            for future in concurrent.futures.as_completed(futures):
+                                output_queue.put(future.result())
 
-            # 모든 worker 스레드 종료 후에 None 큐에 넣음
-            output_queue.put(None)
+                            output_queue.join(timeout=1)
+                        except KeyboardInterrupt:
+                            terminate_event.set()
+                            break
 
-            # 스레드의 결과를 출력
-            print_output()
+                    output_queue.put(None)
+
+                    output_queue.join()
+
+                    print_output()
 
         except ValueError as e:
             print(str(e))
 
 if __name__ == "__main__":
     main()
-
-
