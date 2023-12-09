@@ -11,22 +11,21 @@ import signal
 
 output_queue = Queue()
 input_lock = threading.Lock()
-terminate_event = threading.Event()  # 종료 이벤트
+interrupt_flag = False  # 시그널 핸들러에서 사용할 인터럽트 플래그
 
-def handle_interrupt(signum, frame):
-    print(f"Received signal. Cleaning up... {signum}")
-    terminate_event.set()
-    output_queue.put(None)
-    output_queue.join()
-    sys.exit(0)
+def signal_handler(signum, frame):
+        global interrupt_flag
+        interrupt_flag = True
 
 def get_node_names():
     clsh_hosts = os.environ.get('CLSH_HOSTS')
     if clsh_hosts:
+        print("Note: use CLSH_HOSTS environment")
         return clsh_hosts.split(':')
 
     clsh_hostfile = os.environ.get('CLSH_HOSTFILE')
     if clsh_hostfile:
+        print(f"Note: use hostfile {clsh_hostfile} (CLSH_HOSTFILE env)")
         try:
             with open(clsh_hostfile, 'r') as f:
                 return f.read().splitlines()
@@ -37,7 +36,9 @@ def get_node_names():
 
     try:
         with open(default_hostfile, 'r') as f:
+            print(f"Note: use hostfile {default_hostfile} (default)")
             return f.read().splitlines()
+        
     except FileNotFoundError:
         pass
 
@@ -138,54 +139,34 @@ def print_output():
     print("-------------------------")
 
 
-def process_input(command, nodes, out_dir, err_dir):
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        # 각 노드에 대한 worker 함수를 스레드 풀에서 실행
-        futures = [executor.submit(
-            worker, node, command, out_dir, err_dir) for node in nodes]
-
-        # Future의 결과를 가져와 출력 큐에 넣음
-        for future in concurrent.futures.as_completed(futures):
-            output_queue.put(future.result())
-
-    # 모든 worker 스레드 종료 후에 None 큐에 넣음
-    output_queue.put(None)
-
-    # 스레드의 결과를 출력
-    print_output()
-
 
 def main():
-    signal.signal(signal.SIGTERM, handle_interrupt)
-    signal.signal(signal.SIGQUIT, handle_interrupt)
-
     parser = argparse.ArgumentParser()
     parser.add_argument('--hostlist', type=str, default=None)
-    parser.add_argument('--hostfile', type=str, required='-i' in sys.argv, default=None) # -i 옵션에서는 hostfile 필수
+    parser.add_argument('--hostfile', type=str, default=None)
     parser.add_argument('--out', type=str, default=None)
     parser.add_argument('--err', type=str, default=None)
     parser.add_argument('command', type=str, nargs='*', default=None)
     parser.add_argument('-i', action='store_true')  # 대화식 모드 플래그
     args, remaining_args = parser.parse_known_args()
 
-    if args.hostlist:
-        nodes = args.hostlist.split(',')
-    elif args.hostfile is None:
-        try:
-            nodes = get_node_names()
-        except ValueError as e:
-            return
-    else:
-        with open(args.hostfile, 'r') as f:
-            nodes = f.read().splitlines()
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    global interrupt_flag
 
-    # interactive mode에서는 --hostfile이 반드시 필요한 경우에만 명령을 처리
-    if args.i and not args.hostfile:
-        print("Error: '--hostfile' is required in interactive mode.")
-        return
+    if args.hostlist:
+        print("Note: use hostlist")
+        nodes = args.hostlist.split(',')
+    elif args.hostfile:
+        print("Note: use hostfile")
+        with open(args.hostfile, 'r') as hostfile:
+            nodes = hostfile.read().splitlines()
+    else:
+        nodes = get_node_names()
+    
 
     if args.i:
-        print(f"Enter 'quit' to leave this interactive mode. Working with nodes: {', '.join(get_node_names())}")
+        print(f"Enter 'quit' to leave this interactive mode. Working with nodes: {', '.join(nodes)}")
         while True:
             try:
                 user_input = input("clsh> ")
@@ -206,27 +187,29 @@ def main():
                     print("LOCAL:", local_stdout)
                     print(local_stderr, end="")
                 else:
-                    # Remote command
-                    if args.hostfile:
-                        with input_lock:
+                    # Remote command                
+                    with input_lock:
+                        if args.hostfile:
                             with open(args.hostfile, 'r') as hostfile:
                                 nodes = hostfile.read().splitlines()
+                        else:
+                            nodes = get_node_names()
 
-                            command_tokens = shlex.split(user_input)
+                        command_tokens = shlex.split(user_input)
 
-                            with concurrent.futures.ThreadPoolExecutor() as executor:
-                                futures = [executor.submit(
-                                    worker, node, command_tokens, None, None) for node in nodes]
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            futures = [executor.submit(
+                                worker, node, command_tokens, None, None) for node in nodes]
 
-                                # 결과가 나오는 대로 출력
-                                for future in concurrent.futures.as_completed(futures):
-                                    output_queue.put(future.result())
+                            # 결과가 나오는 대로 출력
+                            for future in concurrent.futures.as_completed(futures):
+                                output_queue.put(future.result())
 
-                            # 모든 worker 스레드 종료 후에 None 큐에 넣음
-                            output_queue.put(None)
+                        # 모든 worker 스레드 종료 후에 None 큐에 넣음
+                        output_queue.put(None)
 
-                            # 스레드의 결과를 출력
-                            print_output()
+                        # 스레드의 결과를 출력
+                        print_output()
                      
 
             except EOFError:
@@ -237,40 +220,28 @@ def main():
             print("non-interactive!")
             # 명령행 인수 파싱 시 파이프로 전달된 데이터를 추가로 받음
             if not sys.stdin.isatty():
-                # sys.stdin이 터미널이 아닌 경우 파이프로 데이터를 받아옴
-                stdin_data = sys.stdin.read().strip()
-                # 받아온 데이터를 명령행 인수로 추가
-                args.command = ['xargs', *args.command, stdin_data]
-
-            if args.hostlist:
-                nodes = args.hostlist.split(',')
-            elif args.hostfile is None:
-                try:
-                    nodes = get_node_names()
-                except ValueError as e:
-                    return
-            else:
-                with open(args.hostfile, 'r') as f:
-                    nodes = f.read().splitlines()
+                stdin_data = sys.stdin.read().strip() # sys.stdin이 터미널이 아닌 경우 파이프로 데이터를 받아옴
+                args.command = ['xargs', *args.command, stdin_data] # 받아온 데이터를 명령행 인수로 추가
 
             command = args.command
 
             out_dir = args.out if args.out else None
             err_dir = args.err if args.err else None
 
-            if args.command == []: # 명령어가 없이 실행했을 때
-                print(f"Switching to interactive mode. Working with nodes: {', '.join(get_node_names())}")
+            if args.command == []: # 명령어 없이 실행했을 때
+                print(f"No command was entered. Switching to interactive mode. Working with nodes: {', '.join(get_node_names())}")
                 user_input = input("clsh> ").split()
                 command = user_input
 
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 # 각 노드에 대한 worker 함수를 스레드 풀에서 실행
-                futures = [executor.submit(
-                    worker, node, command, out_dir, err_dir) for node in nodes]
+                futures = [executor.submit(worker, node, command, out_dir, err_dir) for node in nodes]
 
                 # Future의 결과를 가져와 출력 큐에 넣음
                 for future in concurrent.futures.as_completed(futures):
+                    if interrupt_flag:
+                        break
                     output_queue.put(future.result())
 
             # 모든 worker 스레드 종료 후에 None 큐에 넣음
